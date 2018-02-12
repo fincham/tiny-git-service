@@ -1,0 +1,56 @@
+#!/usr/bin/python3
+
+import os
+import base64
+import hashlib
+import sys
+import pathlib
+import configparser
+
+keys_path = "/opt/hotplate/git/keys"
+acl_path = "/opt/hotplate/git/acl.ini"
+
+def git_packet_line(line):
+	return "%s%s" % ("{0:0{1}x}".format(len(line)+4, 4), line)
+
+def public_key_to_fingerprint(line):
+    key = base64.b64decode(line.strip().split()[1])
+    return base64.b64encode(hashlib.sha256(key).digest()).decode('ascii').strip('=')
+
+if __name__ == "__main__":
+    keys = {}
+    client_fingerprint_hash, client_fingerprint = sys.argv[-1].split(':', 2)
+    if not client_fingerprint_hash == 'SHA256':
+        print(git_packet_line("ERR Only SHA256 format fingerprints are currently supported. Check your SSH configuration."))
+        sys.exit(1)
+
+    for key in pathlib.Path(keys_path).glob('*'):
+        with key.open() as key_file:
+            for line in key_file.read().splitlines(False):
+                fingerprint = public_key_to_fingerprint(line)
+                keys[fingerprint] = {'key': line, 'user': key.name}
+
+    if sys.argv[1] == 'find-key':
+        print('command="/opt/hotplate/git/restricted-shell git SHA256:%s",restrict %s' % (client_fingerprint, keys[client_fingerprint]['key']))
+        sys.exit(0)
+    elif sys.argv[1] == 'git':
+        requested_repo = pathlib.Path(os.environ['SSH_ORIGINAL_COMMAND'].strip("'").split("'")[-1])
+        requested_command = os.environ['SSH_ORIGINAL_COMMAND'].lower().split()[0]
+        user = keys[client_fingerprint]['user']
+
+        acl_config = configparser.ConfigParser()
+        acl_config.read(acl_path)
+
+        for repo in acl_config.sections():
+            if pathlib.Path(repo) == requested_repo:
+                read_users = acl_config[repo].get('read', '').split(', ')
+                write_users = acl_config[repo].get('write', '').split(', ')
+                if requested_command == 'git-upload-pack' and (user in read_users or user in write_users):
+                    os.execlp('git', 'git', 'upload-pack', repo)
+                elif requested_command == 'git-receive-pack' and user in write_users:
+                    os.execlp('git', 'git', 'receive-pack', repo)
+                else:
+                    print(git_packet_line("ERR The operation you requested is not supported."))
+                break
+
+        print(git_packet_line("ERR The repository you requested doesn't exist."))
