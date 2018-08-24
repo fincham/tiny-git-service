@@ -63,8 +63,8 @@ if __name__ == "__main__":
             if not repo.endswith('.git'):
                 repo_path = repo + '.git'
             if pathlib.Path(repo_path) == requested_repo:
-                read_users = acl_config[repo].get('read', '').split(', ')
-                write_users = acl_config[repo].get('write', '').split(', ')
+                read_users =  map(str.strip, acl_config[repo].get('read', '').split(', '))
+                write_users =  map(str.strip, acl_config[repo].get('write', '').split(', '))
                 if requested_command == 'git-upload-pack' and (user in read_users or user in write_users):
                     os.execlp('git', 'git', 'upload-pack', str(repo_path))
                 elif requested_command == 'git-receive-pack' and user in write_users:
