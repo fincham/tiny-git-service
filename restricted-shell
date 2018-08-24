@@ -1,23 +1,29 @@
 #!/usr/bin/python3
 
+import argparse
 import os
 import base64
 import hashlib
 import sys
 import pathlib
 import configparser
+import subprocess
 
-keys_path = "/opt/hotplate/git/keys"
-acl_path = "/opt/hotplate/git/acl.ini"
+keys_path = "/opt/hotplate/git/git-config/keys/"
+acl_path = "/opt/hotplate/git/git-config/acl.ini"
+repos_home = pathlib.Path("/home/git")
 
 def git_packet_line(line):
-	return "%s%s" % ("{0:0{1}x}".format(len(line)+4, 4), line)
+    return "%s%s" % ("{0:0{1}x}".format(len(line)+4, 4), line)
 
 def public_key_to_fingerprint(line):
     key = base64.b64decode(line.strip().split()[1])
     return base64.b64encode(hashlib.sha256(key).digest()).decode('ascii').strip('=')
 
 if __name__ == "__main__":
+    acl_config = configparser.ConfigParser()
+    acl_config.read(acl_path)
+
     keys = {}
     client_fingerprint_hash, client_fingerprint = sys.argv[-1].split(':', 2)
     if not client_fingerprint_hash == 'SHA256':
@@ -27,30 +33,52 @@ if __name__ == "__main__":
     for key in pathlib.Path(keys_path).glob('*'):
         with key.open() as key_file:
             for line in key_file.read().splitlines(False):
-                fingerprint = public_key_to_fingerprint(line)
-                keys[fingerprint] = {'key': line, 'user': key.name}
+                try:
+                    fingerprint = public_key_to_fingerprint(line)
+                    keys[fingerprint] = {'key': line, 'user': key.name}
+                except:
+                    pass
 
-    if sys.argv[1] == 'find-key':
-        print('command="/opt/hotplate/git/restricted-shell git SHA256:%s",restrict %s' % (client_fingerprint, keys[client_fingerprint]['key']))
+    if sys.argv[1] == 'find-key': # to be run as "nobody"
+        try:
+            print('command="/opt/hotplate/git/restricted-shell git SHA256:%s",restrict %s' % (client_fingerprint, keys[client_fingerprint]['key']))
+        except:
+            pass
         sys.exit(0)
-    elif sys.argv[1] == 'git':
-        requested_repo = pathlib.Path(os.environ['SSH_ORIGINAL_COMMAND'].strip("'").split("'")[-1])
-        requested_command = os.environ['SSH_ORIGINAL_COMMAND'].lower().split()[0]
-        user = keys[client_fingerprint]['user']
+    elif sys.argv[1] == 'git': # to be run as "git"
+        user = 'nobody'
+        try:
+            user = keys[client_fingerprint]['user']
+            requested_path = os.environ['SSH_ORIGINAL_COMMAND'].strip("'").split("'")[-1]
+            requested_repo = pathlib.Path(requested_path.strip('/'))
+            requested_command = os.environ['SSH_ORIGINAL_COMMAND'].lower().split()[0]
+        except:
+            print("Sorry, no shell here, %s." % user)
+            sys.exit(1)
 
-        acl_config = configparser.ConfigParser()
-        acl_config.read(acl_path)
-
+        if not str(requested_repo).endswith('.git'):
+            requested_repo = requested_repo.with_suffix('.git')
+        
         for repo in acl_config.sections():
-            if pathlib.Path(repo) == requested_repo:
+            if not repo.endswith('.git'):
+                repo_path = repo + '.git'
+            if pathlib.Path(repo_path) == requested_repo:
                 read_users = acl_config[repo].get('read', '').split(', ')
                 write_users = acl_config[repo].get('write', '').split(', ')
                 if requested_command == 'git-upload-pack' and (user in read_users or user in write_users):
-                    os.execlp('git', 'git', 'upload-pack', repo)
+                    os.execlp('git', 'git', 'upload-pack', str(repo_path))
                 elif requested_command == 'git-receive-pack' and user in write_users:
-                    os.execlp('git', 'git', 'receive-pack', repo)
+                    os.execlp('git', 'git', 'receive-pack', str(repo_path))
                 else:
                     print(git_packet_line("ERR The operation you requested is not supported."))
-                break
+                    sys.exit(1)
 
-        print(git_packet_line("ERR The repository you requested doesn't exist."))
+        print(git_packet_line("ERR The repository you requested (%s) doesn't exist." % requested_repo))
+        sys.exit(1)
+    elif sys.argv[1] == 'update-config': # to be run as "git"
+        for repo in acl_config.sections():
+            repo_path = "%s/%s" % (repos_home, repo)
+            if not repo.endswith('.git'):
+                repo_path = "%s.git" % repo_path
+            if not pathlib.Path(repo_path).exists():
+                created = subprocess.call(['git', 'init', '--bare', str(repos_home / repo_path)])
